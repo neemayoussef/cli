@@ -23,6 +23,7 @@ func shortenQuery(q string) string {
 var issueComments = shortenQuery(`
 	comments(first: 100) {
 		nodes {
+			id,
 			author{login},
 			authorAssociation,
 			body,
@@ -30,7 +31,9 @@ var issueComments = shortenQuery(`
 			includesCreatedEdit,
 			isMinimized,
 			minimizedReason,
-			reactionGroups{content,users{totalCount}}
+			reactionGroups{content,users{totalCount}},
+			url,
+			viewerDidAuthor
 		},
 		pageInfo{hasNextPage,endCursor},
 		totalCount
@@ -72,11 +75,13 @@ var prReviewRequests = shortenQuery(`
 var prReviews = shortenQuery(`
 	reviews(first: 100) {
 		nodes {
+			id,
 			author{login},
 			authorAssociation,
 			submittedAt,
 			body,
 			state,
+			commit{oid},
 			reactionGroups{content,users{totalCount}}
 		}
 		pageInfo{hasNextPage,endCursor}
@@ -182,7 +187,7 @@ func RequiredStatusCheckRollupGraphQL(prID, after string) string {
 								state,
 								targetUrl,
 								createdAt,
-                isRequired(pullRequestId: %[2]s)
+								isRequired(pullRequestId: %[2]s)
 							},
 							...on CheckRun {
 								name,
@@ -192,7 +197,7 @@ func RequiredStatusCheckRollupGraphQL(prID, after string) string {
 								startedAt,
 								completedAt,
 								detailsUrl,
-                isRequired(pullRequestId: %[2]s)
+								isRequired(pullRequestId: %[2]s)
 							}
 						},
 						pageInfo{hasNextPage,endCursor}
@@ -256,7 +261,7 @@ func IssueGraphQL(fields []string) string {
 	for _, field := range fields {
 		switch field {
 		case "author":
-			q = append(q, `author{login}`)
+			q = append(q, `author{login,...on User{id,name}}`)
 		case "mergedBy":
 			q = append(q, `mergedBy{login}`)
 		case "headRepositoryOwner":

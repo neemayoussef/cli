@@ -1,6 +1,7 @@
 package create
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,10 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AlecAivazis/survey/v2"
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/context"
+	ghContext "github.com/cli/cli/v2/context"
 	"github.com/cli/cli/v2/git"
 	"github.com/cli/cli/v2/internal/browser"
 	"github.com/cli/cli/v2/internal/config"
@@ -21,23 +21,19 @@ import (
 	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
-	"github.com/cli/cli/v2/pkg/prompt"
 	"github.com/spf13/cobra"
 )
-
-type iprompter interface {
-	Select(string, string, []string) (int, error)
-}
 
 type CreateOptions struct {
 	// This struct stores user input and factory functions
 	HttpClient func() (*http.Client, error)
+	GitClient  *git.Client
 	Config     func() (config.Config, error)
 	IO         *iostreams.IOStreams
-	Remotes    func() (context.Remotes, error)
+	Remotes    func() (ghContext.Remotes, error)
 	Branch     func() (string, error)
 	Browser    browser.Browser
-	Prompter   iprompter
+	Prompter   shared.Prompt
 	Finder     shared.PRFinder
 
 	TitleProvided bool
@@ -68,22 +64,24 @@ type CreateOptions struct {
 type CreateContext struct {
 	// This struct stores contextual data about the creation process and is for building up enough
 	// data to create a pull request
-	RepoContext        *context.ResolvedRemotes
+	RepoContext        *ghContext.ResolvedRemotes
 	BaseRepo           *api.Repository
 	HeadRepo           ghrepo.Interface
 	BaseTrackingBranch string
 	BaseBranch         string
 	HeadBranch         string
 	HeadBranchLabel    string
-	HeadRemote         *context.Remote
+	HeadRemote         *ghContext.Remote
 	IsPushEnabled      bool
 	Client             *api.Client
+	GitClient          *git.Client
 }
 
 func NewCmdCreate(f *cmdutil.Factory, runF func(*CreateOptions) error) *cobra.Command {
 	opts := &CreateOptions{
 		IO:         f.IOStreams,
 		HttpClient: f.HttpClient,
+		GitClient:  f.GitClient,
 		Config:     f.Config,
 		Remotes:    f.Remotes,
 		Branch:     f.Branch,
@@ -272,15 +270,10 @@ func createRun(opts *CreateOptions) (err error) {
 	}
 
 	if !opts.TitleProvided {
-		err = shared.TitleSurvey(state)
+		err = shared.TitleSurvey(opts.Prompter, state)
 		if err != nil {
 			return
 		}
-	}
-
-	editorCommand, err := cmdutil.DetermineEditor(opts.Config)
-	if err != nil {
-		return
 	}
 
 	defer shared.PreserveInput(opts.IO, state, &err)()
@@ -288,7 +281,7 @@ func createRun(opts *CreateOptions) (err error) {
 	if !opts.BodyProvided {
 		templateContent := ""
 		if opts.RecoverFile == "" {
-			tpl := shared.NewTemplateManager(client.HTTP(), ctx.BaseRepo, opts.RootDirOverride, opts.RepoOverride == "", true)
+			tpl := shared.NewTemplateManager(client.HTTP(), ctx.BaseRepo, opts.Prompter, opts.RootDirOverride, opts.RepoOverride == "", true)
 			var template shared.Template
 			template, err = tpl.Choose()
 			if err != nil {
@@ -302,7 +295,7 @@ func createRun(opts *CreateOptions) (err error) {
 			}
 		}
 
-		err = shared.BodySurvey(state, templateContent, editorCommand)
+		err = shared.BodySurvey(opts.Prompter, state, templateContent)
 		if err != nil {
 			return
 		}
@@ -315,7 +308,7 @@ func createRun(opts *CreateOptions) (err error) {
 
 	allowPreview := !state.HasMetadata() && shared.ValidURL(openURL)
 	allowMetadata := ctx.BaseRepo.ViewerCanTriage()
-	action, err := shared.ConfirmPRSubmission(allowPreview, allowMetadata, state.Draft)
+	action, err := shared.ConfirmPRSubmission(opts.Prompter, allowPreview, allowMetadata, state.Draft)
 	if err != nil {
 		return fmt.Errorf("unable to confirm: %w", err)
 	}
@@ -332,7 +325,7 @@ func createRun(opts *CreateOptions) (err error) {
 			return
 		}
 
-		action, err = shared.ConfirmPRSubmission(!state.HasMetadata(), false, state.Draft)
+		action, err = shared.ConfirmPRSubmission(opts.Prompter, !state.HasMetadata(), false, state.Draft)
 		if err != nil {
 			return
 		}
@@ -369,15 +362,16 @@ func createRun(opts *CreateOptions) (err error) {
 func initDefaultTitleBody(ctx CreateContext, state *shared.IssueMetadataState) error {
 	baseRef := ctx.BaseTrackingBranch
 	headRef := ctx.HeadBranch
+	gitClient := ctx.GitClient
 
-	commits, err := git.Commits(baseRef, headRef)
+	commits, err := gitClient.Commits(context.Background(), baseRef, headRef)
 	if err != nil {
 		return err
 	}
 
 	if len(commits) == 1 {
 		state.Title = commits[0].Title
-		body, err := git.CommitBody(commits[0].Sha)
+		body, err := gitClient.CommitBody(context.Background(), commits[0].Sha)
 		if err != nil {
 			return err
 		}
@@ -395,11 +389,11 @@ func initDefaultTitleBody(ctx CreateContext, state *shared.IssueMetadataState) e
 	return nil
 }
 
-func determineTrackingBranch(remotes context.Remotes, headBranch string) *git.TrackingRef {
+func determineTrackingBranch(gitClient *git.Client, remotes ghContext.Remotes, headBranch string) *git.TrackingRef {
 	refsForLookup := []string{"HEAD"}
 	var trackingRefs []git.TrackingRef
 
-	headBranchConfig := git.ReadBranchConfig(headBranch)
+	headBranchConfig := gitClient.ReadBranchConfig(context.Background(), headBranch)
 	if headBranchConfig.RemoteName != "" {
 		tr := git.TrackingRef{
 			RemoteName: headBranchConfig.RemoteName,
@@ -418,7 +412,7 @@ func determineTrackingBranch(remotes context.Remotes, headBranch string) *git.Tr
 		refsForLookup = append(refsForLookup, tr.String())
 	}
 
-	resolvedRefs, _ := git.ShowRefs(refsForLookup...)
+	resolvedRefs, _ := gitClient.ShowRefs(context.Background(), refsForLookup)
 	if len(resolvedRefs) > 1 {
 		for _, r := range resolvedRefs[1:] {
 			if r.Hash != resolvedRefs[0].Hash {
@@ -475,12 +469,17 @@ func NewCreateContext(opts *CreateOptions) (*CreateContext, error) {
 	}
 	client := api.NewClientFromHTTP(httpClient)
 
+	// TODO: consider obtaining remotes from GitClient instead
 	remotes, err := opts.Remotes()
 	if err != nil {
-		return nil, err
+		// When a repo override value is given, ignore errors when fetching git remotes
+		// to support using this command outside of git repos.
+		if opts.RepoOverride == "" {
+			return nil, err
+		}
 	}
 
-	repoContext, err := context.ResolveRemotesToRepos(remotes, client, opts.RepoOverride)
+	repoContext, err := ghContext.ResolveRemotesToRepos(remotes, client, opts.RepoOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -515,16 +514,17 @@ func NewCreateContext(opts *CreateOptions) (*CreateContext, error) {
 		headBranch = headBranch[idx+1:]
 	}
 
-	if ucc, err := git.UncommittedChangeCount(); err == nil && ucc > 0 {
+	gitClient := opts.GitClient
+	if ucc, err := gitClient.UncommittedChangeCount(context.Background()); err == nil && ucc > 0 {
 		fmt.Fprintf(opts.IO.ErrOut, "Warning: %s\n", text.Pluralize(ucc, "uncommitted change"))
 	}
 
 	var headRepo ghrepo.Interface
-	var headRemote *context.Remote
+	var headRemote *ghContext.Remote
 
 	if isPushEnabled {
 		// determine whether the head branch is already pushed to a remote
-		if pushedTo := determineTrackingBranch(remotes, headBranch); pushedTo != nil {
+		if pushedTo := determineTrackingBranch(gitClient, remotes, headBranch); pushedTo != nil {
 			isPushEnabled = false
 			if r, err := remotes.FindByName(pushedTo.RemoteName); err == nil {
 				headRepo = r
@@ -571,12 +571,7 @@ func NewCreateContext(opts *CreateOptions) (*CreateContext, error) {
 		pushOptions = append(pushOptions, "Skip pushing the branch")
 		pushOptions = append(pushOptions, "Cancel")
 
-		var selectedOption int
-		//nolint:staticcheck // SA1019: prompt.SurveyAskOne is deprecated: use Prompter
-		err = prompt.SurveyAskOne(&survey.Select{
-			Message: fmt.Sprintf("Where should we push the '%s' branch?", headBranch),
-			Options: pushOptions,
-		}, &selectedOption)
+		selectedOption, err := opts.Prompter.Select(fmt.Sprintf("Where should we push the '%s' branch?", headBranch), "", pushOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -625,6 +620,7 @@ func NewCreateContext(opts *CreateOptions) (*CreateContext, error) {
 		IsPushEnabled:      isPushEnabled,
 		RepoContext:        repoContext,
 		Client:             client,
+		GitClient:          gitClient,
 	}, nil
 
 }
@@ -713,11 +709,12 @@ func handlePush(opts CreateOptions, ctx CreateContext) error {
 		headRepoURL := ghrepo.FormatRemoteURL(headRepo, cloneProtocol)
 
 		// TODO: prevent clashes with another remote of a same name
-		gitRemote, err := git.AddRemote("fork", headRepoURL)
+		gitClient := ctx.GitClient
+		gitRemote, err := gitClient.AddRemote(context.Background(), "fork", headRepoURL, []string{})
 		if err != nil {
 			return fmt.Errorf("error adding remote: %w", err)
 		}
-		headRemote = &context.Remote{
+		headRemote = &ghContext.Remote{
 			Remote: gitRemote,
 			Repo:   headRepo,
 		}
@@ -729,12 +726,11 @@ func handlePush(opts CreateOptions, ctx CreateContext) error {
 			pushTries := 0
 			maxPushTries := 3
 			for {
-				r := NewRegexpWriter(opts.IO.ErrOut, gitPushRegexp, "")
-				defer r.Flush()
-				cmdErr := r
-				cmdIn := opts.IO.In
-				cmdOut := opts.IO.Out
-				if err := git.Push(headRemote.Name, fmt.Sprintf("HEAD:%s", ctx.HeadBranch), cmdIn, cmdOut, cmdErr); err != nil {
+				w := NewRegexpWriter(opts.IO.ErrOut, gitPushRegexp, "")
+				defer w.Flush()
+				gitClient := ctx.GitClient
+				ref := fmt.Sprintf("HEAD:%s", ctx.HeadBranch)
+				if err := gitClient.Push(context.Background(), headRemote.Name, ref, git.WithStderr(w)); err != nil {
 					if didForkRepo && pushTries < maxPushTries {
 						pushTries++
 						// first wait 2 seconds after forking, then 4s, then 6s

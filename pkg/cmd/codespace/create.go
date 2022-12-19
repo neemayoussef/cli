@@ -81,7 +81,11 @@ func newCreateCmd(app *App) *cobra.Command {
 		},
 	}
 
-	createCmd.Flags().StringVarP(&opts.repo, "repo", "r", "", "repository name with owner: user/repo")
+	createCmd.Flags().StringVarP(&opts.repo, "repo", "R", "", "repository name with owner: user/repo")
+	if err := addDeprecatedRepoShorthand(createCmd, &opts.repo); err != nil {
+		fmt.Fprintf(app.io.ErrOut, "%v\n", err)
+	}
+
 	createCmd.Flags().StringVarP(&opts.branch, "branch", "b", "", "repository branch")
 	createCmd.Flags().StringVarP(&opts.location, "location", "l", "", "location: {EastUs|SouthEastAsia|WestEurope|WestUs2} (determined automatically if not provided)")
 	createCmd.Flags().StringVarP(&opts.machine, "machine", "m", "", "hardware specifications for the VM")
@@ -225,7 +229,7 @@ func (a *App) Create(ctx context.Context, opts createOptions) error {
 		}
 	}
 
-	machine, err := getMachineName(ctx, a.apiClient, repository.ID, opts.machine, branch, userInputs.Location)
+	machine, err := getMachineName(ctx, a.apiClient, repository.ID, opts.machine, branch, userInputs.Location, devContainerPath)
 	if err != nil {
 		return fmt.Errorf("error getting machine type: %w", err)
 	}
@@ -411,8 +415,8 @@ func (a *App) showStatus(ctx context.Context, codespace *api.Codespace) error {
 }
 
 // getMachineName prompts the user to select the machine type, or validates the machine if non-empty.
-func getMachineName(ctx context.Context, apiClient apiClient, repoID int, machine, branch, location string) (string, error) {
-	machines, err := apiClient.GetCodespacesMachines(ctx, repoID, branch, location)
+func getMachineName(ctx context.Context, apiClient apiClient, repoID int, machine, branch, location string, devcontainerPath string) (string, error) {
+	machines, err := apiClient.GetCodespacesMachines(ctx, repoID, branch, location, devcontainerPath)
 	if err != nil {
 		return "", fmt.Errorf("error requesting machine instance types: %w", err)
 	}

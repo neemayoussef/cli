@@ -66,6 +66,7 @@ type liveshareSession interface {
 	StartSharing(context.Context, string, int) (liveshare.ChannelID, error)
 	StartSSHServer(context.Context) (int, string, error)
 	StartSSHServerWithOptions(context.Context, liveshare.StartSSHServerOptions) (int, string, error)
+	RebuildContainer(context.Context, bool) error
 }
 
 // Connects to a codespace using Live Share and returns that session
@@ -101,7 +102,7 @@ type apiClient interface {
 	CreateCodespace(ctx context.Context, params *api.CreateCodespaceParams) (*api.Codespace, error)
 	EditCodespace(ctx context.Context, codespaceName string, params *api.EditCodespaceParams) (*api.Codespace, error)
 	GetRepository(ctx context.Context, nwo string) (*api.Repository, error)
-	GetCodespacesMachines(ctx context.Context, repoID int, branch, location string) ([]*api.Machine, error)
+	GetCodespacesMachines(ctx context.Context, repoID int, branch, location string, devcontainerPath string) ([]*api.Machine, error)
 	GetCodespaceRepositoryContents(ctx context.Context, codespace *api.Codespace, path string) ([]byte, error)
 	ListDevContainers(ctx context.Context, repoID int, branch string, limit int) (devcontainers []api.DevContainerEntry, err error)
 	GetCodespaceRepoSuggestions(ctx context.Context, partialSearch string, params api.RepoSearchParameters) ([]string, error)
@@ -282,4 +283,20 @@ func (c codespace) hasUnsavedChanges() bool {
 // running returns whether the codespace environment is running.
 func (c codespace) running() bool {
 	return c.State == api.CodespaceStateAvailable
+}
+
+// addDeprecatedRepoShorthand adds a -r parameter (deprecated shorthand for --repo)
+// which instructs the user to use -R instead.
+func addDeprecatedRepoShorthand(cmd *cobra.Command, target *string) error {
+	cmd.Flags().StringVarP(target, "repo-deprecated", "r", "", "(Deprecated) Shorthand for --repo")
+
+	if err := cmd.Flags().MarkHidden("repo-deprecated"); err != nil {
+		return fmt.Errorf("error marking `-r` shorthand as hidden: %w", err)
+	}
+
+	if err := cmd.Flags().MarkShorthandDeprecated("repo-deprecated", "use `-R` instead"); err != nil {
+		return fmt.Errorf("error marking `-r` shorthand as deprecated: %w", err)
+	}
+
+	return nil
 }
