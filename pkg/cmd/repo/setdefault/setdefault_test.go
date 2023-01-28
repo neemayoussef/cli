@@ -29,7 +29,7 @@ func TestNewCmdSetDefault(t *testing.T) {
 		{
 			name: "no argument",
 			gitStubs: func(cs *run.CommandStubber) {
-				cs.Register(`git rev-parse --is-inside-work-tree`, 0, "true")
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
 			},
 			input:  "",
 			output: SetDefaultOptions{},
@@ -37,7 +37,7 @@ func TestNewCmdSetDefault(t *testing.T) {
 		{
 			name: "repo argument",
 			gitStubs: func(cs *run.CommandStubber) {
-				cs.Register(`git rev-parse --is-inside-work-tree`, 0, "true")
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
 			},
 			input:  "cli/cli",
 			output: SetDefaultOptions{Repo: ghrepo.New("cli", "cli")},
@@ -52,15 +52,23 @@ func TestNewCmdSetDefault(t *testing.T) {
 		{
 			name: "view flag",
 			gitStubs: func(cs *run.CommandStubber) {
-				cs.Register(`git rev-parse --is-inside-work-tree`, 0, "true")
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
 			},
 			input:  "--view",
 			output: SetDefaultOptions{ViewMode: true},
 		},
 		{
+			name: "unset flag",
+			gitStubs: func(cs *run.CommandStubber) {
+				cs.Register(`git rev-parse --git-dir`, 0, ".git")
+			},
+			input:  "--unset",
+			output: SetDefaultOptions{UnsetMode: true},
+		},
+		{
 			name: "run from non-git directory",
 			gitStubs: func(cs *run.CommandStubber) {
-				cs.Register(`git rev-parse --is-inside-work-tree`, 1, "")
+				cs.Register(`git rev-parse --git-dir`, 128, "")
 			},
 			input:   "",
 			wantErr: true,
@@ -75,6 +83,7 @@ func TestNewCmdSetDefault(t *testing.T) {
 		io.SetStderrTTY(true)
 		f := &cmdutil.Factory{
 			IOStreams: io,
+			GitClient: &git.Client{GitPath: "/fake/path/to/git"},
 		}
 
 		var gotOpts *SetDefaultOptions
@@ -127,6 +136,33 @@ func TestDefaultRun(t *testing.T) {
 		errMsg        string
 	}{
 		{
+			name: "unset mode with base resolved current default",
+			tty:  true,
+			opts: SetDefaultOptions{UnsetMode: true},
+			remotes: []*context.Remote{
+				{
+					Remote: &git.Remote{Name: "origin", Resolved: "base"},
+					Repo:   repo1,
+				},
+			},
+			gitStubs: func(cs *run.CommandStubber) {
+				cs.Register(`git config --unset remote.origin.gh-resolved`, 0, "")
+			},
+			wantStdout: "✓ Unset OWNER/REPO as default repository\n",
+		},
+		{
+			name: "unset mode no current default",
+			tty:  true,
+			opts: SetDefaultOptions{UnsetMode: true},
+			remotes: []*context.Remote{
+				{
+					Remote: &git.Remote{Name: "origin"},
+					Repo:   repo1,
+				},
+			},
+			wantStdout: "no default repository has been set\n",
+		},
+		{
 			name: "view mode no current default",
 			opts: SetDefaultOptions{ViewMode: true},
 			remotes: []*context.Remote{
@@ -135,7 +171,7 @@ func TestDefaultRun(t *testing.T) {
 					Repo:   repo1,
 				},
 			},
-			wantStdout: "no default repo has been set; use `gh repo default` to select one\n",
+			wantStdout: "no default repository has been set; use `gh repo set-default` to select one\n",
 		},
 		{
 			name: "view mode with base resolved current default",
