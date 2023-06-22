@@ -23,8 +23,8 @@ import (
 	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/cli/cli/v2/pkg/jsoncolor"
-	"github.com/cli/go-gh/pkg/jq"
-	"github.com/cli/go-gh/pkg/template"
+	"github.com/cli/go-gh/v2/pkg/jq"
+	"github.com/cli/go-gh/v2/pkg/template"
 	"github.com/spf13/cobra"
 )
 
@@ -309,7 +309,7 @@ func apiRun(opts *ApiOptions) error {
 		return err
 	}
 
-	host, _ := cfg.DefaultHost()
+	host, _ := cfg.Authentication().DefaultHost()
 
 	if opts.Hostname != "" {
 		host = opts.Hostname
@@ -321,6 +321,7 @@ func apiRun(opts *ApiOptions) error {
 		return err
 	}
 
+	isFirstPage := true
 	hasNextPage := true
 	for hasNextPage {
 		resp, err := httpRequest(httpClient, host, method, requestPath, requestBody, requestHeaders)
@@ -328,10 +329,16 @@ func apiRun(opts *ApiOptions) error {
 			return err
 		}
 
-		endCursor, err := processResponse(resp, opts, bodyWriter, headersWriter, &tmpl)
+		if !isGraphQL {
+			requestPath, hasNextPage = findNextPage(resp)
+			requestBody = nil // prevent repeating GET parameters
+		}
+
+		endCursor, err := processResponse(resp, opts, bodyWriter, headersWriter, tmpl, isFirstPage, !hasNextPage)
 		if err != nil {
 			return err
 		}
+		isFirstPage = false
 
 		if !opts.Paginate {
 			break
@@ -342,9 +349,6 @@ func apiRun(opts *ApiOptions) error {
 			if hasNextPage {
 				params["endCursor"] = endCursor
 			}
-		} else {
-			requestPath, hasNextPage = findNextPage(resp)
-			requestBody = nil // prevent repeating GET parameters
 		}
 
 		if hasNextPage && opts.ShowResponseHeaders {
@@ -355,7 +359,7 @@ func apiRun(opts *ApiOptions) error {
 	return tmpl.Flush()
 }
 
-func processResponse(resp *http.Response, opts *ApiOptions, bodyWriter, headersWriter io.Writer, template *template.Template) (endCursor string, err error) {
+func processResponse(resp *http.Response, opts *ApiOptions, bodyWriter, headersWriter io.Writer, template *template.Template, isFirstPage, isLastPage bool) (endCursor string, err error) {
 	if opts.ShowResponseHeaders {
 		fmt.Fprintln(headersWriter, resp.Proto, resp.Status)
 		printHeaders(headersWriter, resp.Header, opts.IO.ColorEnabled())
@@ -387,7 +391,11 @@ func processResponse(resp *http.Response, opts *ApiOptions, bodyWriter, headersW
 
 	if opts.FilterOutput != "" && serverError == "" {
 		// TODO: reuse parsed query across pagination invocations
-		err = jq.Evaluate(responseBody, bodyWriter, opts.FilterOutput)
+		indent := ""
+		if opts.IO.IsStdoutTTY() {
+			indent = "  "
+		}
+		err = jq.EvaluateFormatted(responseBody, bodyWriter, opts.FilterOutput, indent, opts.IO.ColorEnabled())
 		if err != nil {
 			return
 		}
@@ -399,6 +407,13 @@ func processResponse(resp *http.Response, opts *ApiOptions, bodyWriter, headersW
 	} else if isJSON && opts.IO.ColorEnabled() {
 		err = jsoncolor.Write(bodyWriter, responseBody, "  ")
 	} else {
+		if isJSON && opts.Paginate && !isGraphQLPaginate && !opts.ShowResponseHeaders {
+			responseBody = &paginatedArrayReader{
+				Reader:      responseBody,
+				isFirstPage: isFirstPage,
+				isLastPage:  isLastPage,
+			}
+		}
 		_, err = io.Copy(bodyWriter, responseBody)
 	}
 	if err != nil {
