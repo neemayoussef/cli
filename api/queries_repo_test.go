@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -8,6 +9,8 @@ import (
 
 	"github.com/cli/cli/v2/internal/ghrepo"
 	"github.com/cli/cli/v2/pkg/httpmock"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGitHubRepo_notFound(t *testing.T) {
@@ -466,4 +469,100 @@ func TestDisplayName(t *testing.T) {
 			t.Errorf("display name was %s wanted %s", actual, tt.want)
 		}
 	}
+}
+
+func TestRepoExists(t *testing.T) {
+	tests := []struct {
+		name       string
+		httpStub   func(*httpmock.Registry)
+		repo       ghrepo.Interface
+		existCheck bool
+		wantErrMsg string
+	}{
+		{
+			name: "repo exists",
+			httpStub: func(r *httpmock.Registry) {
+				r.Register(
+					httpmock.REST("HEAD", "repos/OWNER/REPO"),
+					httpmock.StringResponse("{}"),
+				)
+			},
+			repo:       ghrepo.New("OWNER", "REPO"),
+			existCheck: true,
+			wantErrMsg: "",
+		},
+		{
+			name: "repo does not exists",
+			httpStub: func(r *httpmock.Registry) {
+				r.Register(
+					httpmock.REST("HEAD", "repos/OWNER/REPO"),
+					httpmock.StatusStringResponse(404, "Not Found"),
+				)
+			},
+			repo:       ghrepo.New("OWNER", "REPO"),
+			existCheck: false,
+			wantErrMsg: "",
+		},
+		{
+			name: "http error",
+			httpStub: func(r *httpmock.Registry) {
+				r.Register(
+					httpmock.REST("HEAD", "repos/OWNER/REPO"),
+					httpmock.StatusStringResponse(500, "Internal Server Error"),
+				)
+			},
+			repo:       ghrepo.New("OWNER", "REPO"),
+			existCheck: false,
+			wantErrMsg: "HTTP 500 (https://api.github.com/repos/OWNER/REPO)",
+		},
+	}
+	for _, tt := range tests {
+		reg := &httpmock.Registry{}
+		if tt.httpStub != nil {
+			tt.httpStub(reg)
+		}
+
+		client := newTestClient(reg)
+
+		t.Run(tt.name, func(t *testing.T) {
+			exist, err := RepoExists(client, ghrepo.New("OWNER", "REPO"))
+			if tt.wantErrMsg != "" {
+				assert.Equal(t, tt.wantErrMsg, err.Error())
+			} else {
+				assert.NoError(t, err)
+			}
+
+			if exist != tt.existCheck {
+				t.Errorf("RepoExists() returns %v, expected %v", exist, tt.existCheck)
+				return
+			}
+		})
+	}
+}
+
+func TestForkRepoReturnsErrorWhenForkIsNotPossible(t *testing.T) {
+	// Given our API returns 202 with a Fork that is the same as
+	// the repo we provided
+	repoName := "test-repo"
+	ownerLogin := "test-owner"
+	stubbedForkResponse := repositoryV3{
+		Name: repoName,
+		Owner: struct{ Login string }{
+			Login: ownerLogin,
+		},
+	}
+
+	reg := &httpmock.Registry{}
+	reg.Register(
+		httpmock.REST("POST", fmt.Sprintf("repos/%s/%s/forks", ownerLogin, repoName)),
+		httpmock.StatusJSONResponse(202, stubbedForkResponse),
+	)
+
+	client := newTestClient(reg)
+
+	// When we fork the repo
+	_, err := ForkRepo(client, ghrepo.New(ownerLogin, repoName), ownerLogin, "", false)
+
+	// Then it provides a useful error message
+	require.Equal(t, fmt.Errorf("%s/%s cannot be forked. A single user account cannot own both a parent and fork.", ownerLogin, repoName), err)
 }

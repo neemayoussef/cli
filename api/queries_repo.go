@@ -124,6 +124,9 @@ type Repository struct {
 	Projects struct {
 		Nodes []RepoProject
 	}
+	ProjectsV2 struct {
+		Nodes []ProjectV2
+	}
 
 	// pseudo-field that keeps track of host name of this repo
 	hostname string
@@ -548,7 +551,7 @@ func ForkRepo(client *Client, repo ghrepo.Interface, org, newName string, defaul
 	// The GitHub API will happily return a HTTP 200 when attempting to fork own repo even though no forking
 	// actually took place. Ensure that we raise an error instead.
 	if ghrepo.IsSame(repo, newRepo) {
-		return newRepo, fmt.Errorf("%s cannot be forked", ghrepo.FullName(repo))
+		return newRepo, fmt.Errorf("%s cannot be forked. A single user account cannot own both a parent and fork.", ghrepo.FullName(repo))
 	}
 
 	return newRepo, nil
@@ -1369,4 +1372,22 @@ func GetRepoIDs(client *Client, host string, repositories []ghrepo.Interface) ([
 		result[i] = graphqlResult[k].DatabaseID
 	}
 	return result, nil
+}
+
+func RepoExists(client *Client, repo ghrepo.Interface) (bool, error) {
+	path := fmt.Sprintf("%srepos/%s/%s", ghinstance.RESTPrefix(repo.RepoHost()), repo.RepoOwner(), repo.RepoName())
+
+	resp, err := client.HTTP().Head(path)
+	if err != nil {
+		return false, err
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		return true, nil
+	case 404:
+		return false, nil
+	default:
+		return false, ghAPI.HandleHTTPError(resp)
+	}
 }

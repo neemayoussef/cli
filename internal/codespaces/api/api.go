@@ -1,13 +1,12 @@
 package api
 
 // For descriptions of service interfaces, see:
-// - https://online.visualstudio.com/api/swagger (for visualstudio.com)
 // - https://docs.github.com/en/rest/reference/repos (for api.github.com)
 // - https://github.com/github/github/blob/master/app/api/codespaces.rb (for vscs_internal)
 // TODO(adonovan): replace the last link with a public doc URL when available.
 
 // TODO(adonovan): a possible reorganization would be to split this
-// file into three internal packages, one per backend service, and to
+// file into two internal packages, one per backend service, and to
 // rename api.API to github.Client:
 //
 // - github.GetUser(github.Client)
@@ -20,7 +19,6 @@ package api
 // - codespaces.GetToken(Client, login, name)
 // - codespaces.List(Client, user)
 // - codespaces.Start(Client, token, codespace)
-// - visualstudio.GetRegionLocation(http.Client) // no dependency on github
 //
 // This would make the meaning of each operation clearer.
 
@@ -34,6 +32,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -42,13 +41,14 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghinstance"
+	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/opentracing/opentracing-go"
 )
 
 const (
-	githubServer = "https://github.com"
-	githubAPI    = "https://api.github.com"
-	vscsAPI      = "https://online.visualstudio.com"
+	defaultAPIURL    = "https://api.github.com"
+	defaultServerURL = "https://github.com"
 )
 
 const (
@@ -60,31 +60,40 @@ const (
 
 // API is the interface to the codespace service.
 type API struct {
-	client       httpClient
-	vscsAPI      string
+	client       func() (*http.Client, error)
 	githubAPI    string
 	githubServer string
 	retryBackoff time.Duration
 }
 
-type httpClient interface {
-	Do(req *http.Request) (*http.Response, error)
-}
-
 // New creates a new API client connecting to the configured endpoints with the HTTP client.
-func New(serverURL, apiURL, vscsURL string, httpClient httpClient) *API {
-	if serverURL == "" {
-		serverURL = githubServer
-	}
+func New(f *cmdutil.Factory) *API {
+	apiURL := os.Getenv("GITHUB_API_URL")
 	if apiURL == "" {
-		apiURL = githubAPI
+		cfg, err := f.Config()
+		if err != nil {
+			// fallback to the default api endpoint
+			apiURL = defaultAPIURL
+		} else {
+			host, _ := cfg.Authentication().DefaultHost()
+			apiURL = ghinstance.RESTPrefix(host)
+		}
 	}
-	if vscsURL == "" {
-		vscsURL = vscsAPI
+
+	serverURL := os.Getenv("GITHUB_SERVER_URL")
+	if serverURL == "" {
+		cfg, err := f.Config()
+		if err != nil {
+			// fallback to the default server endpoint
+			serverURL = defaultServerURL
+		} else {
+			host, _ := cfg.Authentication().DefaultHost()
+			serverURL = ghinstance.HostPrefix(host)
+		}
 	}
+
 	return &API{
-		client:       httpClient,
-		vscsAPI:      strings.TrimSuffix(vscsURL, "/"),
+		client:       f.HttpClient,
 		githubAPI:    strings.TrimSuffix(apiURL, "/"),
 		githubServer: strings.TrimSuffix(serverURL, "/"),
 		retryBackoff: 100 * time.Millisecond,
@@ -95,6 +104,11 @@ func New(serverURL, apiURL, vscsURL string, httpClient httpClient) *API {
 type User struct {
 	Login string `json:"login"`
 	Type  string `json:"type"`
+}
+
+// ServerURL returns the server url (not the API url), such as https://github.com
+func (a *API) ServerURL() string {
+	return a.githubServer
 }
 
 // GetUser returns the user associated with the given token.
@@ -187,6 +201,7 @@ type Codespace struct {
 	GitStatus                      CodespaceGitStatus  `json:"git_status"`
 	Connection                     CodespaceConnection `json:"connection"`
 	Machine                        CodespaceMachine    `json:"machine"`
+	RuntimeConstraints             RuntimeConstraints  `json:"runtime_constraints"`
 	VSCSTarget                     string              `json:"vscs_target"`
 	PendingOperation               bool                `json:"pending_operation"`
 	PendingOperationDisabledReason string              `json:"pending_operation_disabled_reason"`
@@ -232,11 +247,20 @@ const (
 )
 
 type CodespaceConnection struct {
-	SessionID      string   `json:"sessionId"`
-	SessionToken   string   `json:"sessionToken"`
-	RelayEndpoint  string   `json:"relayEndpoint"`
-	RelaySAS       string   `json:"relaySas"`
-	HostPublicKeys []string `json:"hostPublicKeys"`
+	TunnelProperties TunnelProperties `json:"tunnelProperties"`
+}
+
+type TunnelProperties struct {
+	ConnectAccessToken     string `json:"connectAccessToken"`
+	ManagePortsAccessToken string `json:"managePortsAccessToken"`
+	ServiceUri             string `json:"serviceUri"`
+	TunnelId               string `json:"tunnelId"`
+	ClusterId              string `json:"clusterId"`
+	Domain                 string `json:"domain"`
+}
+
+type RuntimeConstraints struct {
+	AllowedPortPrivacySettings []string `json:"allowed_port_privacy_settings"`
 }
 
 // ListCodespaceFields is the list of exportable fields for a codespace when using the `gh cs list` command.
@@ -613,6 +637,45 @@ func (a *API) GetCodespacesMachines(ctx context.Context, repoID int, branch, loc
 	}
 
 	return response.Machines, nil
+}
+
+// GetCodespacesPermissionsCheck returns a bool indicating whether the user has accepted permissions for the given repo and devcontainer path.
+func (a *API) GetCodespacesPermissionsCheck(ctx context.Context, repoID int, branch string, devcontainerPath string) (bool, error) {
+	reqURL := fmt.Sprintf("%s/repositories/%d/codespaces/permissions_check", a.githubAPI, repoID)
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("error creating request: %w", err)
+	}
+
+	q := req.URL.Query()
+	q.Add("ref", branch)
+	q.Add("devcontainer_path", devcontainerPath)
+	req.URL.RawQuery = q.Encode()
+
+	a.setHeaders(req)
+	resp, err := a.do(ctx, req, "/repositories/*/codespaces/permissions_check")
+	if err != nil {
+		return false, fmt.Errorf("error making request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, api.HandleHTTPError(resp)
+	}
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, fmt.Errorf("error reading response body: %w", err)
+	}
+
+	var response struct {
+		Accepted bool `json:"accepted"`
+	}
+	if err := json.Unmarshal(b, &response); err != nil {
+		return false, fmt.Errorf("error unmarshalling response: %w", err)
+	}
+
+	return response.Accepted, nil
 }
 
 // RepoSearchParameters are the optional parameters for searching for repositories.
@@ -1119,7 +1182,13 @@ func (a *API) do(ctx context.Context, req *http.Request, spanName string) (*http
 	span, ctx := opentracing.StartSpanFromContext(ctx, spanName)
 	defer span.Finish()
 	req = req.WithContext(ctx)
-	return a.client.Do(req)
+
+	httpClient, err := a.client()
+	if err != nil {
+		return nil, err
+	}
+
+	return httpClient.Do(req)
 }
 
 // setHeaders sets the required headers for the API.
@@ -1139,6 +1208,16 @@ func (a *API) withRetry(f func() (*http.Response, error)) (*http.Response, error
 		if resp.StatusCode < 500 {
 			return resp, nil
 		}
-		return nil, errors.New("retry")
+		return nil, fmt.Errorf("received response with status code %d", resp.StatusCode)
 	}, backoff.WithMaxRetries(bo, 3))
+}
+
+// HTTPClient returns the HTTP client used to make requests to the API.
+func (a *API) HTTPClient() (*http.Client, error) {
+	httpClient, err := a.client()
+	if err != nil {
+		return nil, err
+	}
+
+	return httpClient, nil
 }

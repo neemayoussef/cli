@@ -6,7 +6,7 @@ import (
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	shared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
 	"github.com/cli/cli/v2/pkg/cmdutil"
@@ -24,6 +24,7 @@ type EditOptions struct {
 	Surveyor        Surveyor
 	Fetcher         EditableOptionsFetcher
 	EditorRetriever EditorRetriever
+	Prompter        shared.EditPrompter
 
 	SelectorArg string
 	Interactive bool
@@ -35,9 +36,10 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 	opts := &EditOptions{
 		IO:              f.IOStreams,
 		HttpClient:      f.HttpClient,
-		Surveyor:        surveyor{},
+		Surveyor:        surveyor{P: f.Prompter},
 		Fetcher:         fetcher{},
 		EditorRetriever: editorRetriever{config: f.Config},
+		Prompter:        f.Prompter,
 	}
 
 	var bodyFile string
@@ -45,15 +47,15 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 	cmd := &cobra.Command{
 		Use:   "edit [<number> | <url> | <branch>]",
 		Short: "Edit a pull request",
-		Long: heredoc.Doc(`
+		Long: heredoc.Docf(`
 			Edit a pull request.
 
 			Without an argument, the pull request that belongs to the current branch
 			is selected.
 
-			Editing a pull request's projects requires authorization with the "project" scope.
-			To authorize, run "gh auth refresh -s project".
-		`),
+			Editing a pull request's projects requires authorization with the %[1]sproject%[1]s scope.
+			To authorize, run %[1]sgh auth refresh -s project%[1]s.
+		`, "`"),
 		Example: heredoc.Doc(`
 			$ gh pr edit 23 --title "I found a bug" --body "Nothing works"
 			$ gh pr edit 23 --add-label "bug,help wanted" --remove-label "core"
@@ -260,6 +262,10 @@ func updatePullRequestReviews(httpClient *http.Client, repo ghrepo.Interface, id
 	if err != nil {
 		return err
 	}
+	if (userIds == nil || len(*userIds) == 0) &&
+		(teamIds == nil || len(*teamIds) == 0) {
+		return nil
+	}
 	union := githubv4.Boolean(false)
 	reviewsRequestParams := githubv4.RequestReviewsInput{
 		PullRequestID: id,
@@ -276,14 +282,16 @@ type Surveyor interface {
 	EditFields(*shared.Editable, string) error
 }
 
-type surveyor struct{}
+type surveyor struct {
+	P shared.EditPrompter
+}
 
 func (s surveyor) FieldsToEdit(editable *shared.Editable) error {
-	return shared.FieldsToEditSurvey(editable)
+	return shared.FieldsToEditSurvey(s.P, editable)
 }
 
 func (s surveyor) EditFields(editable *shared.Editable, editorCmd string) error {
-	return shared.EditFieldsSurvey(editable, editorCmd)
+	return shared.EditFieldsSurvey(s.P, editable, editorCmd)
 }
 
 type EditableOptionsFetcher interface {
@@ -301,7 +309,7 @@ type EditorRetriever interface {
 }
 
 type editorRetriever struct {
-	config func() (config.Config, error)
+	config func() (gh.Config, error)
 }
 
 func (e editorRetriever) Retrieve() (string, error) {
