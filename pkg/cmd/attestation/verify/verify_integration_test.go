@@ -11,6 +11,7 @@ import (
 	"github.com/cli/cli/v2/pkg/cmd/attestation/test"
 	"github.com/cli/cli/v2/pkg/cmd/attestation/verification"
 	"github.com/cli/cli/v2/pkg/cmd/factory"
+	"github.com/cli/go-gh/v2/pkg/auth"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,14 +29,16 @@ func TestVerifyIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	host, _ := auth.DefaultHost()
+
 	publicGoodOpts := Options{
-		APIClient:        api.NewLiveClient(hc, logger),
+		APIClient:        api.NewLiveClient(hc, host, logger),
 		ArtifactPath:     artifactPath,
 		BundlePath:       bundlePath,
 		DigestAlgorithm:  "sha512",
 		Logger:           logger,
 		OCIClient:        oci.NewLiveClient(),
-		OIDCIssuer:       GitHubOIDCIssuer,
+		OIDCIssuer:       verification.GitHubOIDCIssuer,
 		Owner:            "sigstore",
 		SANRegex:         "^https://github.com/sigstore/",
 		SigstoreVerifier: verification.NewLiveSigstoreVerifier(sigstoreConfig),
@@ -60,7 +63,7 @@ func TestVerifyIntegration(t *testing.T) {
 
 		err := runVerify(&opts)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "verifying with issuer \"sigstore.dev\": failed to verify certificate identity: no matching certificate identity found")
+		require.ErrorContains(t, err, "expected SourceRepositoryURI to be https://github.com/sigstore/fakerepo, got https://github.com/sigstore/sigstore-js")
 	})
 
 	t.Run("with invalid owner", func(t *testing.T) {
@@ -69,7 +72,7 @@ func TestVerifyIntegration(t *testing.T) {
 
 		err := runVerify(&opts)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "verifying with issuer \"sigstore.dev\": failed to verify certificate identity: no matching certificate identity found")
+		require.ErrorContains(t, err, "expected SourceRepositoryOwnerURI to be https://github.com/fakeowner, got https://github.com/sigstore")
 	})
 
 	t.Run("with invalid owner and invalid repo", func(t *testing.T) {
@@ -78,7 +81,76 @@ func TestVerifyIntegration(t *testing.T) {
 
 		err := runVerify(&opts)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "verifying with issuer \"sigstore.dev\": failed to verify certificate identity: no matching certificate identity found")
+		require.ErrorContains(t, err, "expected SourceRepositoryURI to be https://github.com/fakeowner/fakerepo, got https://github.com/sigstore/sigstore-js")
+	})
+}
+
+func TestVerifyIntegrationCustomIssuer(t *testing.T) {
+	artifactPath := test.NormalizeRelativePath("../test/data/custom-issuer-artifact")
+	bundlePath := test.NormalizeRelativePath("../test/data/custom-issuer.sigstore.json")
+
+	logger := io.NewTestHandler()
+
+	sigstoreConfig := verification.SigstoreConfig{
+		Logger: logger,
+	}
+
+	cmdFactory := factory.New("test")
+
+	hc, err := cmdFactory.HttpClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	host, _ := auth.DefaultHost()
+
+	baseOpts := Options{
+		APIClient:        api.NewLiveClient(hc, host, logger),
+		ArtifactPath:     artifactPath,
+		BundlePath:       bundlePath,
+		DigestAlgorithm:  "sha256",
+		Logger:           logger,
+		OCIClient:        oci.NewLiveClient(),
+		OIDCIssuer:       "https://token.actions.githubusercontent.com/hammer-time",
+		SigstoreVerifier: verification.NewLiveSigstoreVerifier(sigstoreConfig),
+	}
+
+	t.Run("with owner and valid workflow SAN", func(t *testing.T) {
+		opts := baseOpts
+		opts.Owner = "too-legit"
+		opts.SAN = "https://github.com/too-legit/attest/.github/workflows/integration.yml@refs/heads/main"
+
+		err := runVerify(&opts)
+		require.NoError(t, err)
+	})
+
+	t.Run("with owner and valid workflow SAN regex", func(t *testing.T) {
+		opts := baseOpts
+		opts.Owner = "too-legit"
+		opts.SANRegex = "^https://github.com/too-legit/attest"
+
+		err := runVerify(&opts)
+		require.NoError(t, err)
+	})
+
+	t.Run("with repo and valid workflow SAN", func(t *testing.T) {
+		opts := baseOpts
+		opts.Owner = "too-legit"
+		opts.Repo = "too-legit/attest"
+		opts.SAN = "https://github.com/too-legit/attest/.github/workflows/integration.yml@refs/heads/main"
+
+		err := runVerify(&opts)
+		require.NoError(t, err)
+	})
+
+	t.Run("with repo and valid workflow SAN regex", func(t *testing.T) {
+		opts := baseOpts
+		opts.Owner = "too-legit"
+		opts.Repo = "too-legit/attest"
+		opts.SANRegex = "^https://github.com/too-legit/attest"
+
+		err := runVerify(&opts)
+		require.NoError(t, err)
 	})
 }
 
@@ -99,14 +171,16 @@ func TestVerifyIntegrationReusableWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	host, _ := auth.DefaultHost()
+
 	baseOpts := Options{
-		APIClient:        api.NewLiveClient(hc, logger),
+		APIClient:        api.NewLiveClient(hc, host, logger),
 		ArtifactPath:     artifactPath,
 		BundlePath:       bundlePath,
 		DigestAlgorithm:  "sha256",
 		Logger:           logger,
 		OCIClient:        oci.NewLiveClient(),
-		OIDCIssuer:       GitHubOIDCIssuer,
+		OIDCIssuer:       verification.GitHubOIDCIssuer,
 		SigstoreVerifier: verification.NewLiveSigstoreVerifier(sigstoreConfig),
 	}
 
@@ -185,15 +259,17 @@ func TestVerifyIntegrationReusableWorkflowSignerWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	host, _ := auth.DefaultHost()
+
 	baseOpts := Options{
-		APIClient:        api.NewLiveClient(hc, logger),
+		APIClient:        api.NewLiveClient(hc, host, logger),
 		ArtifactPath:     artifactPath,
 		BundlePath:       bundlePath,
 		Config:           cmdFactory.Config,
 		DigestAlgorithm:  "sha256",
 		Logger:           logger,
 		OCIClient:        oci.NewLiveClient(),
-		OIDCIssuer:       GitHubOIDCIssuer,
+		OIDCIssuer:       verification.GitHubOIDCIssuer,
 		Owner:            "malancas",
 		Repo:             "malancas/attest-demo",
 		SigstoreVerifier: verification.NewLiveSigstoreVerifier(sigstoreConfig),
@@ -203,6 +279,7 @@ func TestVerifyIntegrationReusableWorkflowSignerWorkflow(t *testing.T) {
 		name           string
 		signerWorkflow string
 		expectErr      bool
+		host           string
 	}
 
 	testcases := []testcase{
@@ -220,12 +297,14 @@ func TestVerifyIntegrationReusableWorkflowSignerWorkflow(t *testing.T) {
 			name:           "valid signer workflow without host (defaults to github.com)",
 			signerWorkflow: "github/artifact-attestations-workflows/.github/workflows/attest.yml",
 			expectErr:      false,
+			host:           "github.com",
 		},
 	}
 
 	for _, tc := range testcases {
 		opts := baseOpts
 		opts.SignerWorkflow = tc.signerWorkflow
+		opts.Hostname = tc.host
 
 		err := runVerify(&opts)
 		if tc.expectErr {
