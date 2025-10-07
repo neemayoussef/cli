@@ -10,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 
+	fd "github.com/cli/cli/v2/internal/featuredetection"
 	"github.com/cli/cli/v2/internal/ghinstance"
 )
 
 const (
+	// GitHub API has a limit of 100 per page
 	maxPerPage = 100
 	orderKey   = "order"
 	sortKey    = "sort"
@@ -33,8 +35,9 @@ type Searcher interface {
 }
 
 type searcher struct {
-	client *http.Client
-	host   string
+	client   *http.Client
+	detector fd.Detector
+	host     string
 }
 
 type httpError struct {
@@ -51,115 +54,185 @@ type httpErrorItem struct {
 	Resource string
 }
 
-func NewSearcher(client *http.Client, host string) Searcher {
+func NewSearcher(client *http.Client, host string, detector fd.Detector) Searcher {
 	return &searcher{
-		client: client,
-		host:   host,
+		client:   client,
+		host:     host,
+		detector: detector,
 	}
 }
 
 func (s searcher) Code(query Query) (CodeResult, error) {
 	result := CodeResult{}
-	toRetrieve := query.Limit
+
 	var resp *http.Response
 	var err error
-	for toRetrieve > 0 {
-		query.Limit = min(toRetrieve, maxPerPage)
+
+	// We will request either the query limit if it's less than 1 page, or our max page size.
+	// This number doesn't change to keep a valid offset.
+	//
+	// For example, say we want 150 items out of 500.
+	// We request page #1 for 100 items and get items 0 to 99.
+	// Then we request page #2 for 100 items, we get items 100 to 199 and only keep 100 to 149.
+	// If we were to request page #2 for 50 items, we would instead get items 50 to 99.
+	numItemsToRetrieve := query.Limit
+	query.Limit = min(numItemsToRetrieve, maxPerPage)
+
+	for numItemsToRetrieve > 0 {
 		query.Page = nextPage(resp)
 		if query.Page == 0 {
 			break
 		}
+
 		page := CodeResult{}
 		resp, err = s.search(query, &page)
 		if err != nil {
 			return result, err
 		}
+
+		// If we're going to reach the requested limit, only add that many items,
+		// otherwise add all the results.
+		numItemsToAdd := min(len(page.Items), numItemsToRetrieve)
 		result.IncompleteResults = page.IncompleteResults
+		// The API returns how many items match the query in every response.
+		// With the example above, this would be 500.
 		result.Total = page.Total
-		result.Items = append(result.Items, page.Items...)
-		toRetrieve = toRetrieve - len(page.Items)
+		result.Items = append(result.Items, page.Items[:numItemsToAdd]...)
+		numItemsToRetrieve = numItemsToRetrieve - numItemsToAdd
 	}
+
 	return result, nil
 }
 
 func (s searcher) Commits(query Query) (CommitsResult, error) {
 	result := CommitsResult{}
-	toRetrieve := query.Limit
+
 	var resp *http.Response
 	var err error
-	for toRetrieve > 0 {
-		query.Limit = min(toRetrieve, maxPerPage)
+
+	numItemsToRetrieve := query.Limit
+	query.Limit = min(numItemsToRetrieve, maxPerPage)
+
+	for numItemsToRetrieve > 0 {
 		query.Page = nextPage(resp)
 		if query.Page == 0 {
 			break
 		}
+
 		page := CommitsResult{}
 		resp, err = s.search(query, &page)
 		if err != nil {
 			return result, err
 		}
+
+		numItemsToAdd := min(len(page.Items), numItemsToRetrieve)
 		result.IncompleteResults = page.IncompleteResults
 		result.Total = page.Total
-		result.Items = append(result.Items, page.Items...)
-		toRetrieve = toRetrieve - len(page.Items)
+		result.Items = append(result.Items, page.Items[:numItemsToAdd]...)
+		numItemsToRetrieve = numItemsToRetrieve - numItemsToAdd
 	}
 	return result, nil
 }
 
 func (s searcher) Repositories(query Query) (RepositoriesResult, error) {
 	result := RepositoriesResult{}
-	toRetrieve := query.Limit
+
 	var resp *http.Response
 	var err error
-	for toRetrieve > 0 {
-		query.Limit = min(toRetrieve, maxPerPage)
+
+	numItemsToRetrieve := query.Limit
+	query.Limit = min(numItemsToRetrieve, maxPerPage)
+
+	for numItemsToRetrieve > 0 {
 		query.Page = nextPage(resp)
 		if query.Page == 0 {
 			break
 		}
+
 		page := RepositoriesResult{}
 		resp, err = s.search(query, &page)
 		if err != nil {
 			return result, err
 		}
+
+		numItemsToAdd := min(len(page.Items), numItemsToRetrieve)
 		result.IncompleteResults = page.IncompleteResults
 		result.Total = page.Total
-		result.Items = append(result.Items, page.Items...)
-		toRetrieve = toRetrieve - len(page.Items)
+		result.Items = append(result.Items, page.Items[:numItemsToAdd]...)
+		numItemsToRetrieve = numItemsToRetrieve - numItemsToAdd
 	}
 	return result, nil
 }
 
 func (s searcher) Issues(query Query) (IssuesResult, error) {
 	result := IssuesResult{}
-	toRetrieve := query.Limit
+
 	var resp *http.Response
 	var err error
-	for toRetrieve > 0 {
-		query.Limit = min(toRetrieve, maxPerPage)
+
+	numItemsToRetrieve := query.Limit
+	query.Limit = min(numItemsToRetrieve, maxPerPage)
+
+	for numItemsToRetrieve > 0 {
 		query.Page = nextPage(resp)
 		if query.Page == 0 {
 			break
 		}
+
 		page := IssuesResult{}
 		resp, err = s.search(query, &page)
 		if err != nil {
 			return result, err
 		}
+
+		numItemsToAdd := min(len(page.Items), numItemsToRetrieve)
 		result.IncompleteResults = page.IncompleteResults
 		result.Total = page.Total
-		result.Items = append(result.Items, page.Items...)
-		toRetrieve = toRetrieve - len(page.Items)
+		result.Items = append(result.Items, page.Items[:numItemsToAdd]...)
+		numItemsToRetrieve = numItemsToRetrieve - numItemsToAdd
 	}
 	return result, nil
 }
 
+// search makes a single-page REST search request for code, commits, issues, prs, or repos.
+//
+// The result argument is populated with the following information:
+//
+// - Total: the number of search results matching the query, which may exceed the number of items returned
+// - IncompleteResults: whether the search request exceeded search time limit, potentially being incomplete
+// - Items: the actual matching search results, up to 100 max items per page
+//
+// For more information, see https://docs.github.com/en/rest/search/search?apiVersion=2022-11-28.
 func (s searcher) search(query Query, result interface{}) (*http.Response, error) {
 	path := fmt.Sprintf("%ssearch/%s", ghinstance.RESTPrefix(s.host), query.Kind)
 	qs := url.Values{}
 	qs.Set("page", strconv.Itoa(query.Page))
 	qs.Set("per_page", strconv.Itoa(query.Limit))
-	qs.Set("q", query.String())
+
+	if query.Kind == KindIssues {
+		// TODO advancedIssueSearchCleanup
+		// We won't need feature detection when GHES 3.17 support ends, since
+		// the advanced issue search is the only available search backend for
+		// issues.
+		features, err := s.detector.SearchFeatures()
+		if err != nil {
+			return nil, err
+		}
+
+		if !features.AdvancedIssueSearchAPI {
+			qs.Set("q", query.StandardSearchString())
+		} else {
+			qs.Set("q", query.AdvancedIssueSearchString())
+
+			if features.AdvancedIssueSearchAPIOptIn {
+				// Advanced syntax should be explicitly enabled
+				qs.Set("advanced_search", "true")
+			}
+		}
+	} else {
+		qs.Set("q", query.StandardSearchString())
+	}
+
 	if query.Order != "" {
 		qs.Set(orderKey, query.Order)
 	}
@@ -194,11 +267,19 @@ func (s searcher) search(query Query, result interface{}) (*http.Response, error
 	return resp, nil
 }
 
+// URL returns URL to the global search in web GUI (i.e. github.com/search).
 func (s searcher) URL(query Query) string {
 	path := fmt.Sprintf("https://%s/search", s.host)
 	qs := url.Values{}
 	qs.Set("type", query.Kind)
-	qs.Set("q", query.String())
+
+	// TODO advancedSearchFuture
+	// Currently, the global search GUI does not support the advanced issue
+	// search syntax (even for the issues/PRs tab on the sidebar). When the GUI
+	// is updated, we can use feature detection, and, if available, use the
+	// advanced search syntax.
+	qs.Set("q", query.StandardSearchString())
+
 	if query.Order != "" {
 		qs.Set(orderKey, query.Order)
 	}
@@ -236,10 +317,15 @@ func handleHTTPError(resp *http.Response) error {
 	return httpError
 }
 
+// https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api
 func nextPage(resp *http.Response) (page int) {
 	if resp == nil {
 		return 1
 	}
+
+	// When using pagination, responses get a "Link" field in their header.
+	// When a next page is available, "Link" contains a link to the next page
+	// tagged with rel="next".
 	for _, m := range linkRE.FindAllStringSubmatch(resp.Header.Get("Link"), -1) {
 		if !(len(m) > 2 && m[2] == "next") {
 			continue
